@@ -23,6 +23,8 @@ dfs_por_mes = {}
 dias_consumo_por_mes = {}
 estoque_atual_por_produto = {}
 lista_consumo_diario = []
+# NOVO: lista para entradas diárias
+lista_entrada_diario = []
 
 for file in excel_files:
     file_path = os.path.join(upload_path, file)
@@ -68,6 +70,18 @@ for file in excel_files:
                     df_long = df_long.dropna(subset=['Consumo'])
                     df_long = df_long[df_long['Consumo'] > 0]
                     lista_consumo_diario.append(df_long)
+            except Exception:
+                pass
+            # NOVO: Entradas diárias
+            try:
+                df_entrada_diario = pd.read_excel(file_path, sheet_name='Entrada_Diario')
+                if 'Titulo' in df_entrada_diario.columns and 'Color' in df_entrada_diario.columns:
+                    colunas_data_entrada = [col for col in df_entrada_diario.columns if col not in ['Titulo', 'Color']]
+                    df_entrada_diario['Produto'] = df_entrada_diario['Titulo'].astype(str) + ' - ' + df_entrada_diario['Color'].astype(str)
+                    df_long_entrada = df_entrada_diario.melt(id_vars=['Produto'], value_vars=colunas_data_entrada, var_name='Data', value_name='Entrada')
+                    df_long_entrada = df_long_entrada.dropna(subset=['Entrada'])
+                    df_long_entrada = df_long_entrada[df_long_entrada['Entrada'] > 0]
+                    lista_entrada_diario.append(df_long_entrada)
             except Exception:
                 pass
             # Médias de consumo
@@ -149,8 +163,10 @@ if resultado_final is not None:
 # Dashboard de consumo diário consolidado
 if lista_consumo_diario:
     df_consumo_diario = pd.concat(lista_consumo_diario, ignore_index=True)
+    # NOVO: consolidar entradas diárias
+    df_entrada_diario = pd.concat(lista_entrada_diario, ignore_index=True) if lista_entrada_diario else None
     # Converter Data para datetime
-    meses_es = {'ENERO': 'JAN', 'FEBRERO': 'FEB', 'MARZO': 'MAR', 'ABRIL': 'ABR','MAYO': 'MAI', 'JUNIO': 'JUN', 'JULIO': 'JUL', 'AGOSTO': 'AGO','SEPTIEMBRE': 'SET', 'OCTUBRE': 'OUT', 'NOVIEMBRE': 'NOV', 'DICIEMBRE': 'DEZ'}
+    meses_es = {'ENERO': '01', 'FEBRERO': '02', 'MARZO': '03', 'ABRIL': '04','MAYO': '05', 'JUNIO': '06', 'JULIO': '07', 'AGOSTO': '08','SEPTIEMBRE': '09', 'OCTUBRE': '10', 'NOVIEMBRE': '11', 'DICIEMBRE': '12'}
     def converter_data(col):
         try:
             partes = str(col).split()
@@ -164,6 +180,10 @@ if lista_consumo_diario:
     df_consumo_diario['Data'] = df_consumo_diario['Data'].apply(converter_data)
     df_consumo_diario['Data'] = pd.to_datetime(df_consumo_diario['Data'], errors='coerce')
     df_consumo_diario = df_consumo_diario.dropna(subset=['Data'])
+    if df_entrada_diario is not None:
+        df_entrada_diario['Data'] = df_entrada_diario['Data'].apply(converter_data)
+        df_entrada_diario['Data'] = pd.to_datetime(df_entrada_diario['Data'], errors='coerce')
+        df_entrada_diario = df_entrada_diario.dropna(subset=['Data'])
     st.subheader("Consumo Diário Consolidado - Gráfico Interativo")
     produtos_disp = sorted(df_consumo_diario['Produto'].unique().tolist())
     produto1 = st.sidebar.selectbox("Produto 1 (Consumo Diário)", produtos_disp, key='prod1')
@@ -225,3 +245,41 @@ if lista_consumo_diario:
             st.success('Arquivo "dados_filtrados_dashboard.csv" salvo com sucesso!')
         else:
             st.warning('Nenhum dado para exportar.')
+
+    # NOVO: Gráfico de Estoque Diário
+    if df_entrada_diario is not None:
+        st.subheader("Estoque Diário Acumulado - Gráfico Interativo")
+        produtos_disp_entrada = sorted(list(set(df_entrada_diario['Produto'].unique()) | set(df_consumo_diario['Produto'].unique())))
+        produto1_estoque = st.sidebar.selectbox("Produto 1 (Estoque Diário)", produtos_disp_entrada, key='prod1_estoque')
+        produto2_estoque = st.sidebar.selectbox("Produto 2 (Estoque Diário)", ['(Nenhum)'] + produtos_disp_entrada, key='prod2_estoque')
+        produtos_selecionados_estoque = [produto1_estoque] if produto2_estoque == '(Nenhum)' or produto2_estoque == produto1_estoque else [produto1_estoque, produto2_estoque]
+        fig4 = go.Figure()
+        for prod in produtos_selecionados_estoque:
+            # Consumo diário
+            df_c = df_consumo_diario[df_consumo_diario['Produto'] == prod][['Data','Consumo']].copy()
+            df_c = df_c.groupby('Data').sum().sort_index()
+            # Entradas diárias
+            df_e = df_entrada_diario[df_entrada_diario['Produto'] == prod][['Data','Entrada']].copy() if prod in df_entrada_diario['Produto'].values else pd.DataFrame(columns=['Data','Entrada'])
+            df_e = df_e.groupby('Data').sum().sort_index()
+            # Corrigir tipos para comparação
+            data_min_dt = pd.to_datetime(data_min)
+            data_max_dt = pd.to_datetime(data_max)
+            e_min = df_e.index.min() if not df_e.empty else data_min_dt
+            e_max = df_e.index.max() if not df_e.empty else data_max_dt
+            # Unir datas
+            todas_datas = pd.date_range(min(data_min_dt, e_min), max(data_max_dt, e_max))
+            df_estoque = pd.DataFrame(index=todas_datas)
+            df_estoque['Entrada'] = df_e['Entrada'] if not df_e.empty else 0
+            df_estoque['Consumo'] = df_c['Consumo'] if not df_c.empty else 0
+            df_estoque['Entrada'] = df_estoque['Entrada'].fillna(0)
+            df_estoque['Consumo'] = df_estoque['Consumo'].fillna(0)
+            # Estoque inicial: pegar do dicionário estoque_atual_por_produto, se existir, senão 0
+            estoque_inicial = estoque_atual_por_produto.get(prod, 0)
+            # Calcular estoque acumulado
+            df_estoque['Estoque'] = estoque_inicial + df_estoque['Entrada'].cumsum() - df_estoque['Consumo'].cumsum()
+            # Filtrar período
+            mask = (df_estoque.index.date >= periodo[0]) & (df_estoque.index.date <= periodo[1])
+            df_estoque = df_estoque.loc[mask]
+            fig4.add_trace(go.Scatter(x=df_estoque.index, y=df_estoque['Estoque'], mode='lines+markers', name=f'Estoque Diário - {prod}'))
+        fig4.update_layout(title='Estoque Diário Acumulado', xaxis_title='Data', yaxis_title='Estoque', template='plotly_dark', height=500)
+        st.plotly_chart(fig4, use_container_width=True)
